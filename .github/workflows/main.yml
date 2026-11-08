@@ -1,0 +1,72 @@
+name: Build DomainSniffer
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project folder
+        run: |
+          F=$(find . -name Tweak.xm -not -path './.theos/*' -not -path './.git/*' | head -1)
+          [ -z "$F" ] && { echo "::error::Tweak.xm not found"; exit 1; }
+          echo "PROJECT_DIR=$(cd "$(dirname "$F")" && pwd)" >> "$GITHUB_ENV"
+
+      - name: Install tools
+        run: |
+          brew install ldid dpkg make || true
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Install Theos
+        run: |
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Install iOS SDK
+        run: |
+          mkdir -p "$HOME/theos/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git /tmp/sdks
+          mv /tmp/sdks/*.sdk "$HOME/theos/sdks/" || true
+
+      - name: Build dylib
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          make clean || true
+          make FINALPACKAGE=1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      - name: Create dylib.zip
+        if: always()
+        run: |
+          mkdir -p out
+          [ -f build.log ] && cp build.log out/ || true
+          D=$(find "$PROJECT_DIR/.theos/obj" -maxdepth 1 -name "*.dylib" | head -1)
+          if [ -n "$D" ]; then
+            cp "$D" out/
+            (cd out && zip -j dylib.zip "$(basename "$D")")
+          fi
+          ls -la out
+
+      - name: Verify standalone
+        run: |
+          D=$(find "$PROJECT_DIR/.theos/obj" -maxdepth 1 -name "*.dylib" | head -1)
+          otool -L "$D"
+          if otool -L "$D" | grep -qi "substrate\|ellekit"; then
+            echo "::error::dylib depends on Substrate/ElleKit"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DomainSniffer
+          path: |
+            out/dylib.zip
+            out/build.log
+          if-no-files-found: error
